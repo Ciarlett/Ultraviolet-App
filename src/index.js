@@ -8,11 +8,38 @@ import { uvPath } from "@titaniumnetwork-dev/ultraviolet";
 import { epoxyPath } from "@mercuryworkshop/epoxy-transport";
 import { baremuxPath } from "@mercuryworkshop/bare-mux/node";
 
+// Controllo credenziali (Basic Auth) usato sia da Express sia da /wisp/
+function isAuthorized(req) {
+	const header = req.headers.authorization || "";
+	const [scheme, b64] = header.split(" ");
+	if (scheme !== "Basic" || !b64) return false;
+	const decoded = Buffer.from(b64, "base64").toString();
+	const i = decoded.indexOf(":");
+	if (i < 0) return false;
+	const user = decoded.slice(0, i);
+	const pass = decoded.slice(i + 1);
+	return (
+		user === process.env.PROXY_USER && pass === process.env.PROXY_PASS
+	);
+}
+
 const app = express();
+
+// Route pubblica per UptimeRobot (deve stare PRIMA dell'autenticazione)
+app.get("/health", (req, res) => res.send("ok"));
+
+// Tutto il resto richiede utente e password
+app.use((req, res, next) => {
+	if (isAuthorized(req)) return next();
+	res
+		.set("WWW-Authenticate", 'Basic realm="proxy"')
+		.status(401)
+		.send("Unauthorized");
+});
+
 // Load our publicPath first and prioritize it over UV.
 app.use(express.static("./public"));
 // Load vendor files last.
-// The vendor's uv.config.js won't conflict with our uv.config.js inside the publicPath directory.
 app.use("/uv/", express.static(uvPath));
 app.use("/epoxy/", express.static(epoxyPath));
 app.use("/baremux/", express.static(baremuxPath));
@@ -20,7 +47,7 @@ app.use("/baremux/", express.static(baremuxPath));
 // Error for everything else
 app.use((req, res) => {
 	res.status(404);
-	res.sendFile("./public/404.html");
+	res.sendFile(join(process.cwd(), "public", "404.html"));
 });
 
 const server = createServer();
@@ -31,10 +58,15 @@ server.on("request", (req, res) => {
 	app(req, res);
 });
 server.on("upgrade", (req, socket, head) => {
+	if (!isAuthorized(req)) {
+		socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+		socket.destroy();
+		return;
+	}
 	if (req.url.endsWith("/wisp/")) {
 		wisp.routeRequest(req, socket, head);
 		return;
-	} 
+	}
 	socket.end();
 });
 
@@ -45,8 +77,6 @@ if (isNaN(port)) port = 8080;
 server.on("listening", () => {
 	const address = server.address();
 
-	// by default we are listening on 0.0.0.0 (every interface)
-	// we just need to list a few
 	console.log("Listening on:");
 	console.log(`\thttp://localhost:${address.port}`);
 	console.log(`\thttp://${hostname()}:${address.port}`);
@@ -57,7 +87,6 @@ server.on("listening", () => {
 	);
 });
 
-// https://expressjs.com/en/advanced/healthcheck-graceful-shutdown.html
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
